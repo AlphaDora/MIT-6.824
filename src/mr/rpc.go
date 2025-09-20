@@ -22,6 +22,20 @@ type ExampleReply struct {
 	Y int
 }
 
+type TaskArgs struct {
+	IsMap bool
+	TaskId int
+}
+
+type TaskReply struct {
+	Filename string
+	TaskId int
+	IsMap bool
+	NReduce int
+	CanReduceStart bool
+	Assigned bool
+}
+
 // Add your RPC definitions here.
 
 
