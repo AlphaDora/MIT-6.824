@@ -108,7 +108,10 @@ func (rf *Raft) GetState() (int, bool) {
 	var term int
 	var isleader bool
 	// Your code here (2A).
-	isleader = rf.role == Leader
+	isleader = false
+	if rf.role == Leader {
+		isleader = true
+	}
 	term = rf.state.currentTerm
 	return term, isleader
 }
@@ -189,16 +192,20 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// 2A
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-
-	reply.Term = rf.state.currentTerm
+	fmt.Printf("Peer %d request %d for vote\n", args.CandidateId, rf.me)
+	term := rf.state.currentTerm
+	reply.Term = term
 	reply.VoteGranted = false
-
-	if args.Term < rf.state.currentTerm {
+	
+	if args.Term < term {
+		return
+	}
+	if rf.leaderId != -1 {
+		fmt.Printf("Peer %d has leader, return\n", rf.me)
 		return
 	}
 
-	rf.state.currentTerm = args.Term
-	rf.state.votedFor = -1
+	rf.state.votedFor = args.CandidateId
 	reply.VoteGranted = true
 	return
 	// TODO: add log index and term
@@ -220,11 +227,11 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	defer rf.mu.Unlock()
 	reply.Success = false
 	reply.Term = rf.state.currentTerm
-	fmt.Println("Peer %d recive heart beat, role = %d", rf.me, rf.role)
+	
 	if args.Term < rf.state.currentTerm {
 		return
 	}
-
+	fmt.Printf("Peer %d recive heart beat\n", rf.me)
 	if args.Term > rf.state.currentTerm {
 		rf.state.currentTerm = args.Term
 		rf.state.votedFor = -1
@@ -321,13 +328,14 @@ func (rf *Raft) heartbeat() {
 			rf.mu.Unlock()
 			return
 		}
+		fmt.Printf("Begin heartbeat")
 		term := rf.state.currentTerm
 		rf.mu.Unlock()
 		rf.resetElectionTimeout()
 		// for no more than 10 heartbeats per second
 		timeout := rf.electionTimeout + 100
 		time.Sleep(time.Duration(timeout) * time.Millisecond)
-		fmt.Println("Leader %d wake up, send heart beats", rf.me)
+		fmt.Printf("Leader %d wake up, send heart beats\n", rf.me)
 		var wg sync.WaitGroup
 
 		for i := 0; i < len(rf.peers); i++ {
@@ -338,7 +346,7 @@ func (rf *Raft) heartbeat() {
 			go func(i int) {
 				defer wg.Done()
 				reply := AppendEntriesReply{}
-				fmt.Println("Send heart beats to peer %d", i)
+				fmt.Printf("Send heart beats to peer %d\n", i)
 				args := AppendEntriesArgs{Leaderid: rf.me, Term: term}
 				if rf.peers[i].Call("Raft.AppendEntries", &args, &reply) {
 					rf.mu.Lock()
@@ -347,7 +355,7 @@ func (rf *Raft) heartbeat() {
 						rf.state.currentTerm = reply.Term
 						rf.role = Follower
 						rf.state.votedFor = -1
-						fmt.Println("Leader term %d is less than %d, reverts to follower",
+						fmt.Printf("Leader term %d is less than %d, reverts to follower\n",
 							rf.state.currentTerm, reply.Term)
 						return
 					}
@@ -365,20 +373,23 @@ func (rf *Raft) ticker() {
 		if rf.role == Leader {
 			continue
 		}
-		timeout := rf.electionTimeout + rf.electionTimeoutbase
-		time.Sleep(time.Duration(timeout) * time.Millisecond)
+		timeout := time.Duration(rf.electionTimeout + rf.electionTimeoutbase)
+		time.Sleep(timeout * time.Millisecond)
 		// Your code here to check if a leader election should
 		// be started and to randomize sleeping time using
 		// time.Sleep().
-		fmt.Println("Peer %d wakeup", rf.me)
+		fmt.Printf("Peer %d wakeup for %dms\n", rf.me, timeout)
 		// timeout, start new election
-		if rf.lastHeardFromLeader.Add(time.Duration(rf.electionTimeout)).Compare(time.Now()) != -1 {
+		rf.mu.Lock()
+		duration:=time.Since(rf.lastHeardFromLeader)
+		// fmt.Printf("Duration is %d and timeout is %d\n", duration, timeout * time.Millisecond)
+		if duration < timeout * time.Millisecond {
 			continue
 		}
-		fmt.Println("Peer %d start to elect", rf.me)
-		rf.mu.Lock()
+		fmt.Printf("Peer %d start to elect\n", rf.me)
 		rf.role = Candidate
-		rf.state.currentTerm++
+		rf.state.currentTerm += 1
+		term := rf.state.currentTerm
 		rf.state.votedFor = rf.me
 		rf.mu.Unlock()
 		voteCount := 1
@@ -396,16 +407,27 @@ func (rf *Raft) ticker() {
 				if rf.sendRequestVote(i, &args, &reply) {
 					rf.mu.Lock()
 					defer rf.mu.Unlock()
-					if reply.VoteGranted {
+					if reply.Term > term {
+						rf.state.votedFor = -1
+						rf.state.currentTerm = reply.Term
+						rf.role = Follower
+						fmt.Printf("Candidate %d get vote failed for %d\n", rf.me, i)
+						voteCh <- false
+						return
+					}
+
+					if rf.role == Candidate && reply.VoteGranted && term == rf.state.currentTerm {
+						fmt.Printf("Candidate %d get vote with %d\n", rf.me, i)
 						voteCh <- true
 						return
 					}
 				}
+				fmt.Printf("Candidate %d get vote failed\n", rf.me)
 				voteCh <- false
 			}(i)
-			wg.Wait()
-			close(voteCh)
 		}
+		wg.Wait()
+		close(voteCh)
 		for granted := range voteCh {
 			if granted {
 				voteCount++
@@ -414,7 +436,23 @@ func (rf *Raft) ticker() {
 		if voteCount > len(rf.peers)/2+1 {
 			rf.mu.Lock()
 			rf.role = Leader
-			fmt.Println("Peer %d become leader", rf.me)
+			rf.leaderId = rf.me
+			fmt.Printf("Peer %d become leader\n", rf.me)
+			var wg sync.WaitGroup
+			for i := 0; i < len(rf.peers); i++ {
+				if i == rf.me {
+					continue
+				}
+				wg.Add(1)
+				go func(i int) {
+					defer wg.Done()
+					reply := AppendEntriesReply{}
+					args := AppendEntriesArgs{Leaderid: rf.me, Term: term}
+					rf.peers[i].Call("Raft.AppendEntries", &args, &reply)
+				}(i)
+			}
+			wg.Wait()
+
 			rf.mu.Unlock()
 		}
 	}
@@ -435,12 +473,14 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.peers = peers
 	rf.persister = persister
 	rf.me = me
+	rf.leaderId = -1
 
 	// Your initialization code here (2A, 2B, 2C).
 	// 2A
 	// election timeout 300 to 350ms
 	rf.electionTimeoutbase = 300
 	rf.electionTimeoutrand = 50
+	rf.electionTimeout = rand.Intn(rf.electionTimeoutrand) + rf.electionTimeoutbase
 	rf.state.currentTerm = 0
 	rf.state.votedFor = -1
 	rf.state.log = []Entry{}
