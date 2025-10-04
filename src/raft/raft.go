@@ -192,13 +192,14 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// 2A
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	fmt.Printf("Peer %d request %d for vote\n", args.CandidateId, rf.me)
+	fmt.Printf("Peer %d(%d) request %d(%d) for vote\n", 
+		args.CandidateId, args.Term, rf.me, rf.state.currentTerm)
 	reply.Term = rf.state.currentTerm
 	reply.VoteGranted = false
 	
 	if args.Term < rf.state.currentTerm {
-		fmt.Printf("Candidate %d's term %d is less than peer %d's (%d), return false", 
-			args.CandidateId, args.Term, rf.me, rf.state.currentTerm)
+		// fmt.Printf("Candidate %d's term %d is less than peer %d's (%d), return false\n", 
+		// 	args.CandidateId, args.Term, rf.me, rf.state.currentTerm)
 		return
 	}
 	if args.Term > rf.state.currentTerm {
@@ -211,6 +212,9 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	if rf.state.votedFor == -1 || rf.state.votedFor == args.CandidateId{
 		rf.state.votedFor = args.CandidateId
 		reply.VoteGranted = true
+
+		rf.lastHeardFromLeader = time.Now()
+		rf.resetElectionTimeout()
 	}
 	
 	return
@@ -232,19 +236,16 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// fmt.Printf("%d enter appendentries\n", rf.me)
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	fmt.Printf("Follower %d recive heartbeat, leader %d's term: %d, follower's: %d\n", 
-		rf.me, args.Leaderid, args.Term, rf.state.currentTerm)
+	fmt.Printf("Follower %d(%d) recive heartbeat from Leader %d(%d)\n", 
+		rf.me, rf.state.currentTerm, args.Leaderid, args.Term)
 	reply.Success = false
 	reply.Term = rf.state.currentTerm
 	if args.Term < rf.state.currentTerm {
 		return
 	}
-	// fmt.Printf("Term of leader: %d, term of me: %d\n", args.Term, rf.state.currentTerm)
 	if args.Term > rf.state.currentTerm {
-		fmt.Printf("Leader's term (%d) is large than peer %d's (%d)\n", args.Term, rf.me, rf.state.currentTerm)
 		rf.state.currentTerm = args.Term
 		rf.role = Follower
-		fmt.Printf("Peer %d's term update to %d\n", rf.me, rf.state.currentTerm)
 		rf.state.votedFor = -1
 	}
 	// time: ns
@@ -344,12 +345,12 @@ func (rf *Raft) heartbeat() {
 		term := rf.state.currentTerm
 		// fmt.Printf("Begin heartbeat\n")
 		rf.mu.Unlock()
-		rf.resetElectionTimeout()
+		// rf.resetElectionTimeout()
 		// for no more than 10 heartbeats per second
-		timeout := rf.electionTimeout + 100
+		timeout := 120
 		time.Sleep(time.Duration(timeout) * time.Millisecond)
-		fmt.Printf("Leader %d wake up for %dms, send heart beats\n", 
-			rf.me, timeout)
+		// fmt.Printf("Leader %d wake up for %dms, send heart beats\n", 
+		// 	rf.me, timeout)
 		var wg sync.WaitGroup
 
 		for i := 0; i < len(rf.peers); i++ {
@@ -360,18 +361,19 @@ func (rf *Raft) heartbeat() {
 			go func(i int, term int) {
 				defer wg.Done()
 				reply := AppendEntriesReply{}
-				fmt.Printf("Send heart beats to peer %d\n", i)
+				fmt.Printf("Leader %d(%d) send period heart beats to peer %d\n", 
+					rf.me, term, i)
 				args := AppendEntriesArgs{Leaderid: rf.me, Term: term}
 				ok := rf.peers[i].Call("Raft.AppendEntries", &args, &reply)
 				if !ok {
-					fmt.Printf("Leader %d send heart beats failed, maybe network failure\n", 
-						rf.me)
+					// fmt.Printf("Leader %d send heart beats failed in term %d\n", 
+					// 	rf.me, term)
 					return
 				}
 				rf.mu.Lock()
 				if reply.Term > term {
-					fmt.Printf("Leader term %d is less than %d, reverts to follower\n",
-						term, reply.Term)
+					fmt.Printf("Leader%d's term %d is less than %d, reverts to follower\n",
+						rf.me, term, reply.Term)
 					rf.state.currentTerm = reply.Term
 					rf.role = Follower
 					rf.state.votedFor = -1
@@ -390,7 +392,7 @@ func (rf *Raft) heartbeat() {
 func (rf *Raft) ticker() {
 	for rf.killed() == false {
         if rf.role == Leader {
-            time.Sleep(10 * time.Millisecond)
+            // time.Sleep(10 * time.Millisecond)
             continue
         }
 		timeout := time.Duration(rf.electionTimeout + rf.electionTimeoutbase)
@@ -398,8 +400,7 @@ func (rf *Raft) ticker() {
 		// Your code here to check if a leader election should
 		// be started and to randomize sleeping time using
 		// time.Sleep().
-		fmt.Printf("Peer %d wakeup for %dms\n", rf.me, timeout)
-		// timeout, start new election
+
 		rf.mu.Lock()
 		duration := time.Since(rf.lastHeardFromLeader)
 		// fmt.Printf("Duration is %d and timeout is %d\n", duration, timeout * time.Millisecond)
@@ -417,6 +418,7 @@ func (rf *Raft) ticker() {
 		voteCount := 1
 		var wg sync.WaitGroup
 		voteCh := make(chan bool, len(rf.peers)-1)
+		done := make(chan struct{})
 		for i := 0; i < len(rf.peers); i++ {
 			if i == rf.me {
 				continue
@@ -427,24 +429,33 @@ func (rf *Raft) ticker() {
 				reply := RequestVoteReply{}
 				args := RequestVoteArgs{Term: term, CandidateId: rf.me}
 				ok := rf.sendRequestVote(i, &args, &reply)
+				g := false
 				if !ok {
-					fmt.Printf("sendRequestVote() return false, candidate %d get vote failed for %d\n", rf.me, i)
-					voteCh <- false
-					return
+					// fmt.Printf("Candidate %d get vote failed for %d in term %d\n", 
+					// 	rf.me, i, term)
+					// voteCh <- false
+					// return
 				}
 				rf.mu.Lock()
-				defer rf.mu.Unlock()
+				// defer rf.mu.Unlock()
 				if reply.Term > term {
 					rf.state.votedFor = -1
 					rf.state.currentTerm = reply.Term
 					rf.role = Follower
-					fmt.Printf("Candidate %d term less than reply, get vote failed for %d\n", rf.me, i)
-					voteCh <- false
-					return
+					// fmt.Printf("Candidate %d term less than reply, get vote failed for %d\n", rf.me, i)
+					// voteCh <- false
+					// return
 				}
 				if rf.role == Candidate && reply.VoteGranted && rf.state.currentTerm == term {
 					fmt.Printf("Candidate %d get vote with %d\n", rf.me, i)
-					voteCh <- true
+					// voteCh <- true
+					// return
+					g = true
+				}
+				rf.mu.Unlock()
+				select {
+				case voteCh <- g:
+				case <- done:
 					return
 				}
 			}(i, term)
@@ -457,7 +468,7 @@ func (rf *Raft) ticker() {
 		for granted := range voteCh {
 			if granted {
 				voteCount++
-				fmt.Printf("Candidate %d got %d votes\n", rf.me, voteCount)
+				// fmt.Printf("Candidate %d got %d votes\n", rf.me, voteCount)
 				if voteCount >= len(rf.peers)/2 + 1 {
 					rf.mu.Lock()
 					if rf.role != Candidate || rf.state.currentTerm != term {
@@ -467,6 +478,7 @@ func (rf *Raft) ticker() {
 					rf.role = Leader
 					rf.leaderId = rf.me
 					fmt.Printf("Candidate %d become leader\n", rf.me)
+					close(done)
 					var wg sync.WaitGroup
 					for i := 0; i < len(rf.peers); i++ {
 						if i == rf.me {
@@ -477,6 +489,8 @@ func (rf *Raft) ticker() {
 							defer wg.Done()
 							reply := AppendEntriesReply{}
 							args := AppendEntriesArgs{Leaderid: rf.me, Term: rf.state.currentTerm}
+							fmt.Printf("Leader %d (%d) send init heartbeat to %d\n", 
+								rf.me, rf.state.currentTerm, i)
 							rf.peers[i].Call("Raft.AppendEntries", &args, &reply)
 						}(i)
 					}
