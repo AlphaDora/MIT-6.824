@@ -197,7 +197,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	reply.VoteGranted = false
 	
 	if args.Term < rf.state.currentTerm {
-		fmt.Printf("Candidate %d term %d is less than peer %d term %d, return false", 
+		fmt.Printf("Candidate %d's term %d is less than peer %d's (%d), return false", 
 			args.CandidateId, args.Term, rf.me, rf.state.currentTerm)
 		return
 	}
@@ -232,18 +232,19 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// fmt.Printf("%d enter appendentries\n", rf.me)
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	fmt.Printf("Follower %d recive heartbeat, leader %d's term: %d, follower's: %d\n", 
+		rf.me, args.Leaderid, args.Term, rf.state.currentTerm)
 	reply.Success = false
 	reply.Term = rf.state.currentTerm
-	fmt.Printf("Term of leader (%d), term of peer (%d)\n", args.Term, rf.state.currentTerm)
-	// fmt.Printf("%d term: %d, args.Term: %d\n", rf.me, rf.state.currentTerm, args.Term)
 	if args.Term < rf.state.currentTerm {
 		return
 	}
 	// fmt.Printf("Term of leader: %d, term of me: %d\n", args.Term, rf.state.currentTerm)
 	if args.Term > rf.state.currentTerm {
-		fmt.Printf("Term of leader (%d) is large than that of peer %d (%d)\n", args.Term, rf.me, rf.state.currentTerm)
+		fmt.Printf("Leader's term (%d) is large than peer %d's (%d)\n", args.Term, rf.me, rf.state.currentTerm)
 		rf.state.currentTerm = args.Term
-		fmt.Printf("Update to %d\n", rf.state.currentTerm)
+		rf.role = Follower
+		fmt.Printf("Peer %d's term update to %d\n", rf.me, rf.state.currentTerm)
 		rf.state.votedFor = -1
 	}
 	// time: ns
@@ -252,7 +253,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.leaderId = args.Leaderid
 	rf.resetElectionTimeout()
 	reply.Success = true
-	fmt.Printf("Peer %d recive heart beat\n", rf.me)
+	// fmt.Printf("Peer %d recive heart beat\n", rf.me)
 	return
 }
 
@@ -347,7 +348,8 @@ func (rf *Raft) heartbeat() {
 		// for no more than 10 heartbeats per second
 		timeout := rf.electionTimeout + 100
 		time.Sleep(time.Duration(timeout) * time.Millisecond)
-		fmt.Printf("Leader %d wake up, send heart beats\n", rf.me)
+		fmt.Printf("Leader %d wake up for %dms, send heart beats\n", 
+			rf.me, timeout)
 		var wg sync.WaitGroup
 
 		for i := 0; i < len(rf.peers); i++ {
@@ -362,6 +364,8 @@ func (rf *Raft) heartbeat() {
 				args := AppendEntriesArgs{Leaderid: rf.me, Term: term}
 				ok := rf.peers[i].Call("Raft.AppendEntries", &args, &reply)
 				if !ok {
+					fmt.Printf("Leader %d send heart beats failed, maybe network failure\n", 
+						rf.me)
 					return
 				}
 				rf.mu.Lock()
@@ -445,34 +449,44 @@ func (rf *Raft) ticker() {
 				}
 			}(i, term)
 		}
-		wg.Wait()
-		close(voteCh)
+		// Wait while count for votes
+		go func() {
+			wg.Wait()
+			close(voteCh)
+		} ()
 		for granted := range voteCh {
 			if granted {
 				voteCount++
-			}
-		}
-		if voteCount >= len(rf.peers)/2+1 {
-			rf.mu.Lock()
-			rf.role = Leader
-			rf.leaderId = rf.me
-			fmt.Printf("Peer %d become leader\n", rf.me)
-			var wg sync.WaitGroup
-			for i := 0; i < len(rf.peers); i++ {
-				if i == rf.me {
-					continue
+				fmt.Printf("Candidate %d got %d votes\n", rf.me, voteCount)
+				if voteCount >= len(rf.peers)/2 + 1 {
+					rf.mu.Lock()
+					if rf.role != Candidate || rf.state.currentTerm != term {
+						rf.mu.Unlock()
+						return
+					}
+					rf.role = Leader
+					rf.leaderId = rf.me
+					fmt.Printf("Candidate %d become leader\n", rf.me)
+					var wg sync.WaitGroup
+					for i := 0; i < len(rf.peers); i++ {
+						if i == rf.me {
+							continue
+						}
+						wg.Add(1)
+						go func(i int) {
+							defer wg.Done()
+							reply := AppendEntriesReply{}
+							args := AppendEntriesArgs{Leaderid: rf.me, Term: rf.state.currentTerm}
+							rf.peers[i].Call("Raft.AppendEntries", &args, &reply)
+						}(i)
+					}
+					wg.Wait()
+					rf.mu.Unlock()
+					break
 				}
-				wg.Add(1)
-				go func(i int) {
-					defer wg.Done()
-					reply := AppendEntriesReply{}
-					args := AppendEntriesArgs{Leaderid: rf.me, Term: rf.state.currentTerm}
-					rf.peers[i].Call("Raft.AppendEntries", &args, &reply)
-				}(i)
 			}
-			wg.Wait()
-			rf.mu.Unlock()
 		}
+		continue
 	}
 }
 
