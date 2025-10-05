@@ -18,4 +18,4 @@ Basic Sources for MIT 6.824 Distributed Systems Class
 - [MapReduce(2004)](https://www.yuque.com/luojike-sjtec/dl579g/llyrml7xtgxvfgkk)
 - [GFS(2003)](https://www.yuque.com/luojike-sjtec/dl579g/hbghxg7gsomyvwhc)
 - [Raft Extended(2014)](https://www.yuque.com/luojike-sjtec/dl579g/slfiye9ofbw71p6r)
-- [Fault-Tolerant Virtual Machines(2010)] Updated soon (approximately Oct. 5th )
+- [Fault-Tolerant Virtual Machines(2010)](https://www.yuque.com/luojike-sjtec/dl579g/aic6uv2ganckqob0)
