@@ -340,6 +340,7 @@ func (rf *Raft) heartbeat() {
 		rf.mu.Lock()
 		if rf.role != Leader {
 			rf.mu.Unlock()
+			time.Sleep(10 * time.Millisecond)
 			continue
 		}
 		term := rf.state.currentTerm
@@ -392,7 +393,8 @@ func (rf *Raft) heartbeat() {
 func (rf *Raft) ticker() {
 	for rf.killed() == false {
         if rf.role == Leader {
-            // time.Sleep(10 * time.Millisecond)
+			// pause to avoid slow down the execution
+            time.Sleep(10 * time.Millisecond)
             continue
         }
 		timeout := time.Duration(rf.electionTimeout + rf.electionTimeoutbase)
@@ -446,6 +448,8 @@ func (rf *Raft) ticker() {
 					// voteCh <- false
 					// return
 				}
+				// Check role (candidate) 
+				// to avoid multi-leader bugs
 				if rf.role == Candidate && reply.VoteGranted && rf.state.currentTerm == term {
 					fmt.Printf("Candidate %d get vote with %d\n", rf.me, i)
 					// voteCh <- true
